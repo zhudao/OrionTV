@@ -2,9 +2,22 @@ import { create } from "zustand";
 import { SettingsManager } from "@/services/storage";
 import { api, ServerConfig } from "@/services/api";
 import { storageConfig } from "@/services/storageConfig";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import Logger from "@/utils/Logger";
 
 const logger = Logger.withTag('SettingsStore');
+
+// 模块级引用：当前正在进行的 fetchServerConfig Promise。
+// 供 authStore.checkLoginStatus 直接 await，避免用固定超时轮询导致冷启动误判。
+let serverConfigPromise: Promise<void> | null = null;
+
+/**
+ * 获取当前正在进行的 fetchServerConfig Promise（若没有则返回 null）。
+ * 调用方可 await 它以确保 serverConfig 已就绪，而不是用固定超时轮询。
+ */
+export function getServerConfigPromise(): Promise<void> | null {
+  return serverConfigPromise;
+}
 
 interface SettingsState {
   apiBaseUrl: string;
@@ -58,20 +71,24 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       await get().fetchServerConfig();
     }
   },
-  fetchServerConfig: async () => {
-    set({ isLoadingServerConfig: true });
-    try {
-      const config = await api.getServerConfig();
-      if (config) {
-        storageConfig.setStorageType(config.StorageType);
-        set({ serverConfig: config });
+  fetchServerConfig: () => {
+    const p = (async () => {
+      set({ isLoadingServerConfig: true });
+      try {
+        const config = await api.getServerConfig();
+        if (config) {
+          storageConfig.setStorageType(config.StorageType);
+          set({ serverConfig: config });
+        }
+      } catch (error) {
+        set({ serverConfig: null });
+        logger.error("Failed to fetch server config:", error);
+      } finally {
+        set({ isLoadingServerConfig: false });
       }
-    } catch (error) {
-      set({ serverConfig: null });
-      logger.error("Failed to fetch server config:", error);
-    } finally {
-      set({ isLoadingServerConfig: false });
-    }
+    })();
+    serverConfigPromise = p;
+    return p;
   },
   setApiBaseUrl: (url) => set({ apiBaseUrl: url }),
   setM3uUrl: (url) => set({ m3uUrl: url }),
@@ -79,7 +96,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setVideoSource: (config) => set({ videoSource: config }),
   saveSettings: async () => {
     const { apiBaseUrl, m3uUrl, remoteInputEnabled, videoSource } = get();
-
+    const currentSettings = await SettingsManager.get()
+    const currentApiBaseUrl = currentSettings.apiBaseUrl;
     let processedApiBaseUrl = apiBaseUrl.trim();
     if (processedApiBaseUrl.endsWith("/")) {
       processedApiBaseUrl = processedApiBaseUrl.slice(0, -1);
@@ -105,6 +123,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       remoteInputEnabled,
       videoSource,
     });
+    if ( currentApiBaseUrl !== processedApiBaseUrl) {
+      await AsyncStorage.setItem('authCookies', '');
+    }
     api.setBaseUrl(processedApiBaseUrl);
     // Also update the URL in the state so the input field shows the processed URL
     set({ isModalVisible: false, apiBaseUrl: processedApiBaseUrl });
